@@ -1,0 +1,10 @@
+__pycache__/
+.env
+*.json
+*.png
+*.jpg
+*.jpeg
+*.xls
+*.XLS
+*.txt
+!requirements.txt
