@@ -37,6 +37,7 @@ IMG = ("image/jpeg", "image/png", "image/gif")
 
 TESTE_PARA = [x.strip().lower() for x in os.getenv("TESTE_PARA", "").split(",") if x.strip()]
 LOG: list[str] = []
+RESUMO_ULTIMO = ""
 
 
 def log(t):
@@ -201,6 +202,18 @@ def atualizar_relatorio(dr, ctrl, itens_raiz):
         xlsx = R.gerar_excel(historico, enviados, devolvidos, aberturas, nomes, sair)
         dr.gravar_bin(ctrl[nome_rel]["id"], xlsx, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         log(f"Relatório atualizado: {len(enviados)} disparo(s), {len(devolvidos)} devolvidos, {len(aberturas)} aberturas")
+        global RESUMO_ULTIMO
+        if enviados:
+            d = max(enviados)
+            env = enviados[d]
+            dev = sum(1 for e in env if (d, e) in devolvidos)
+            ab = sum(1 for e in env if (d, e) in aberturas)
+            entreg = len(env) - dev
+            sem = next((h[1] for h in historico if h[0] == d), "?")
+            abertos = f"{ab} ({ab / entreg:.0%} dos entregues)" if d >= "2026-11-18" and entreg else "não medido neste envio"
+            RESUMO_ULTIMO = (f"Envio de {dt.date.fromisoformat(d):%d/%m/%Y} (Semana {sem})\n\n"
+                             f"Enviados: {len(env)}\nEntregues: {entreg}\nAbertos: {abertos}\n"
+                             f"Devolvidos por endereço errado: {dev} (lista para corrigir na aba 'Corrigir e-mails')\n")
         return {e for (_, e) in devolvidos}
     except Exception:
         log("aviso: falha ao gerar relatório:\n" + traceback.format_exc())
@@ -240,7 +253,13 @@ def main():
                 log("Agenda: hoje está marcado para PULAR."); salvar_log(); return
             semana = int(agenda[hj])
         elif hoje.weekday() != 1 and not teste:
-            log("Hoje não é dia de envio (só terças ou datas da agenda) — só relatório."); salvar_log(); return
+            log("Hoje não é dia de envio (só terças ou datas da agenda) — só relatório.")
+            if hoje.weekday() == 2 and RESUMO_ULTIMO:
+                avisar(f"📊 Relatório semanal — Oferta de Consórcio ({hoje:%d/%m})",
+                       "Bom dia! O relatório da semana está pronto no Drive:\n"
+                       "Oferta de Consórcio > Controle (não mexer) > Relatório de Envios.xlsx\n\n" + RESUMO_ULTIMO +
+                       "\nAbertura é aproximada (alguns programas bloqueiam imagens; o iPhone pode marcar como aberto sozinho).")
+            salvar_log(); return
         log(f"Semana {semana}{' (definida na agenda)' if hj in agenda else ' (semana do mês)'}")
 
         # 2) arte + textos
