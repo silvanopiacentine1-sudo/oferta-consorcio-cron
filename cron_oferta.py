@@ -195,8 +195,7 @@ def atualizar_relatorio(dr, ctrl, itens_raiz):
                 dr.gravar(f_dev, dev_txt)
                 devolvidos.update(novos)
                 log(f"{len(novos)} novos e-mails devolvidos registrados")
-        sheet = ctrl.get("aberturas", {}).get("id", "")
-        aberturas = R.ler_aberturas(json.loads(os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"]), sheet, log)
+        aberturas = R.ler_aberturas(os.getenv("BLOB_READ_WRITE_TOKEN", ""), log)
         _, nomes = ler_lista(dr, itens_raiz)
         sair = {l.strip().lower() for l in linhas(dr.texto(ctrl["descadastrados.txt"]["id"]))}
         xlsx = R.gerar_excel(historico, enviados, devolvidos, aberturas, nomes, sair)

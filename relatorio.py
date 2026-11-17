@@ -186,31 +186,36 @@ def gerar_excel(historico: list[list[str]], enviados_por_data: dict[str, list[st
     return buf.getvalue()
 
 
-def ler_aberturas(sa_info: dict, sheet_id: str, log=print) -> dict:
-    """{(data, email): (primeira_abertura_local, n)}"""
-    if not sheet_id:
-        return {}
+def ler_aberturas(blob_token: str, log=print) -> dict:
+    """{(data, email): (primeira_abertura_local, n)} — lê os caminhos gravados pelo pixel no Vercel Blob."""
+    import base64, urllib.request, urllib.parse
+    if not blob_token:
+        log("aviso: BLOB_READ_WRITE_TOKEN ausente — aberturas não lidas"); return {}
+    fuso = dt.timezone(dt.timedelta(hours=-4))
+    out, cursor = {}, None
     try:
-        from google.oauth2 import service_account
-        from googleapiclient.discovery import build
-        cr = service_account.Credentials.from_service_account_info(sa_info, scopes=["https://www.googleapis.com/auth/spreadsheets.readonly"])
-        sh = build("sheets", "v4", credentials=cr, cache_discovery=False)
-        vals = sh.spreadsheets().values().get(spreadsheetId=sheet_id, range="A:E").execute().get("values", [])
+        while True:
+            q = {"prefix": "aberturas/", "limit": "1000"}
+            if cursor:
+                q["cursor"] = cursor
+            req = urllib.request.Request("https://blob.vercel-storage.com?" + urllib.parse.urlencode(q),
+                                         headers={"Authorization": f"Bearer {blob_token}", "x-api-version": "11"})
+            d = json.loads(urllib.request.urlopen(req, timeout=60).read())
+            for b in d.get("blobs", []):
+                partes = b["pathname"].split("/")
+                if len(partes) < 4:
+                    continue
+                data, em = partes[1], partes[2]
+                try:
+                    email_ = base64.urlsafe_b64decode(em + "=" * (-len(em) % 4)).decode().lower()
+                    t = dt.datetime.fromisoformat(b["uploadedAt"].replace("Z", "+00:00")).astimezone(fuso).replace(tzinfo=None)
+                except Exception:
+                    continue
+                k = (data, email_)
+                out[k] = (min(out[k][0], t), out[k][1] + 1) if k in out else (t, 1)
+            cursor = d.get("cursor")
+            if not d.get("hasMore") or not cursor:
+                break
     except Exception as ex:
         log(f"aviso: não consegui ler aberturas: {ex}")
-        return {}
-    fuso = dt.timezone(dt.timedelta(hours=-4))
-    out = {}
-    for r in vals:
-        if len(r) < 3 or r[0] == "quando_utc":
-            continue
-        try:
-            t = dt.datetime.fromisoformat(r[0].replace("Z", "+00:00")).astimezone(fuso).replace(tzinfo=None)
-        except Exception:
-            continue
-        k = (r[1], r[2].lower())
-        if k in out:
-            out[k] = (min(out[k][0], t), out[k][1] + 1)
-        else:
-            out[k] = (t, 1)
     return out
