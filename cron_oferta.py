@@ -198,7 +198,14 @@ def atualizar_relatorio(dr, ctrl, itens_raiz):
                 log(f"{len(novos)} novos e-mails devolvidos registrados")
         aberturas = R.ler_aberturas(os.getenv("BLOB_READ_WRITE_TOKEN", ""), log)
         _, nomes = ler_lista(dr, itens_raiz)
-        sair = {l.strip().lower() for l in linhas(dr.texto(ctrl["descadastrados.txt"]["id"]))}
+        f_desc = ctrl["descadastrados.txt"]["id"]
+        desc_txt = dr.texto(f_desc)
+        sair = {l.strip().lower() for l in linhas(desc_txt)}
+        novos_sair = (descadastros_imap() | R.descadastros_web(os.getenv("BLOB_READ_WRITE_TOKEN", ""), log)) - sair
+        if novos_sair:
+            dr.gravar(f_desc, desc_txt.rstrip("\n") + "\n" + "\n".join(sorted(novos_sair)) + "\n")
+            sair |= novos_sair
+            log(f"{len(novos_sair)} novos descadastros registrados")
         xlsx = R.gerar_excel(historico, enviados, devolvidos, aberturas, nomes, sair)
         dr.gravar_bin(ctrl[nome_rel]["id"], xlsx, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         log(f"Relatório atualizado: {len(enviados)} disparo(s), {len(devolvidos)} devolvidos, {len(aberturas)} aberturas")
@@ -303,7 +310,7 @@ def main():
         # 4) descadastros
         desc_txt = dr.texto(f_desc)
         sair = {l.strip().lower() for l in linhas(desc_txt)}
-        novos = descadastros_imap() - sair
+        novos = (descadastros_imap() | R.descadastros_web(os.getenv("BLOB_READ_WRITE_TOKEN", ""), log)) - sair
         if novos and not teste:
             desc_txt = desc_txt.rstrip("\n") + "\n" + "\n".join(sorted(novos)) + "\n"
             dr.gravar(f_desc, desc_txt)

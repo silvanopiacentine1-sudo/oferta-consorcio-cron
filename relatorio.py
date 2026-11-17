@@ -15,7 +15,7 @@ from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
-PASTA_IMAP_DEVOLVIDOS = "Consórcio - Devolvidos"
+PASTA_LIXEIRA = "Deleted Items"  # avisos de devolução dos envios vão para a lixeira (ficam só no relatório)
 RE_EMAIL_TXT = re.compile(r"[A-Za-z0-9._%+'-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 REMETENTES_BOUNCE = ("mailer-daemon", "postmaster", "system administrator", "mail delivery", "microsoftexchange")
 ASSUNTOS_BOUNCE = ("undeliver", "delivery", "não entregue", "nao entregue", "returned", "falha na entrega",
@@ -75,8 +75,7 @@ def coletar_devolucoes(host, user, pwd, enviados_por_data: dict[str, set], ja_de
             todos_enviados[e].append(d)
     with imaplib.IMAP4_SSL(host, 993) as im:
         im.login(user, pwd)
-        pasta_dest = _imap_utf7(PASTA_IMAP_DEVOLVIDOS)
-        im.create(f'"{pasta_dest}"')  # ignora erro se já existir
+        pasta_dest = PASTA_LIXEIRA
         for pasta in ("Inbox", "Junk E-Mail", "Junk"):
             if im.select(f'"{pasta}"')[0] != "OK":
                 continue
@@ -118,7 +117,7 @@ def coletar_devolucoes(host, user, pwd, enviados_por_data: dict[str, set], ja_de
                     im.uid("STORE", uid, "+FLAGS", "(\\Deleted)")
             if mover:
                 im.expunge()
-                log(f"{len(mover)} avisos de devolução movidos de {pasta} para '{PASTA_IMAP_DEVOLVIDOS}'")
+                log(f"{len(mover)} avisos de devolução apagados de {pasta} (registrados no relatório)")
     return novos
 
 
@@ -141,8 +140,8 @@ def gerar_excel(historico: list[list[str]], enviados_por_data: dict[str, list[st
     rs.append([f"Atualizado em {dt.datetime.now(dt.timezone(dt.timedelta(hours=-4))):%d/%m/%Y %H:%M}. "
                "Abertura é aproximada: alguns programas bloqueiam imagens (não contam) e o iPhone/Apple Mail pode marcar como aberto sozinho."])
     rs.append([])
-    cab(rs, ["Data", "Semana", "Arte", "Enviados", "Entregues", "Devolvidos (endereço errado)", "Abertos", "% abertura (sobre entregues)", "Status"],
-        [12, 9, 34, 11, 11, 16, 10, 14, 12])
+    cab(rs, ["Data", "Semana", "Arte", "Enviados", "Entregues", "Devolvidos (endereço errado)", "Abertos", "% abertura (sobre entregues)", "Saíram da lista (total)", "Status"],
+        [12, 9, 34, 11, 11, 16, 10, 14, 14, 12])
     for linha in historico:
         d, sem, arte, _md5, status, _tot = (linha + [""] * 6)[:6]
         env = enviados_por_data.get(d, [])
@@ -151,7 +150,8 @@ def gerar_excel(historico: list[list[str]], enviados_por_data: dict[str, list[st
         entreg = len(env) - dev
         mede = d >= "2026-11-18"
         rs.append([dt.date.fromisoformat(d).strftime("%d/%m/%Y"), int(sem) if sem.isdigit() else sem, arte, len(env), entreg, dev,
-                   ab if mede else "não medido", (f"{ab / entreg:.0%}" if entreg else "-") if mede else "-", status])
+                   ab if mede else "não medido", (f"{ab / entreg:.0%}" if entreg else "-") if mede else "-",
+                   sum(1 for e in env if e in descadastrados), status])
 
     # Corrigir e-mails (todos os devolvidos, sem duplicar)
     cz = wb.create_sheet("Corrigir e-mails")
@@ -173,7 +173,7 @@ def gerar_excel(historico: list[list[str]], enviados_por_data: dict[str, list[st
         for e in enviados_por_data.get(d, []):
             dev = devolvidos.get((d, e))
             ab = aberturas.get((d, e))
-            situ = "Devolvido – endereço errado" if dev else "Entregue"
+            situ = "Devolvido – endereço errado" if dev else ("Entregue – saiu da lista" if e in descadastrados else "Entregue")
             abriu = ("Sim" if ab else "Não") if mede else "não medido"
             ws.append([nomes.get(e, ""), e, situ, "" if dev else abriu,
                        ab[0].strftime("%d/%m/%Y %H:%M") if ab else "", ab[1] if ab else "", dev or ""])
@@ -218,4 +218,33 @@ def ler_aberturas(blob_token: str, log=print) -> dict:
                 break
     except Exception as ex:
         log(f"aviso: não consegui ler aberturas: {ex}")
+    return out
+
+
+def descadastros_web(blob_token: str, log=print) -> set:
+    """E-mails que clicaram em "sair da lista" (página de um clique na Vercel)."""
+    import base64, urllib.request, urllib.parse
+    out, cursor = set(), None
+    if not blob_token:
+        return out
+    try:
+        while True:
+            q = {"prefix": "descadastros/", "limit": "1000"}
+            if cursor:
+                q["cursor"] = cursor
+            req = urllib.request.Request("https://blob.vercel-storage.com?" + urllib.parse.urlencode(q),
+                                         headers={"Authorization": f"Bearer {blob_token}", "x-api-version": "11"})
+            d = json.loads(urllib.request.urlopen(req, timeout=60).read())
+            for b in d.get("blobs", []):
+                p = b["pathname"].split("/")
+                if len(p) >= 3:
+                    try:
+                        out.add(base64.urlsafe_b64decode(p[1] + "=" * (-len(p[1]) % 4)).decode().lower())
+                    except Exception:
+                        pass
+            cursor = d.get("cursor")
+            if not d.get("hasMore") or not cursor:
+                break
+    except Exception as ex:
+        log(f"aviso: não consegui ler descadastros da página: {ex}")
     return out

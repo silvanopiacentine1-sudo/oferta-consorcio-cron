@@ -188,7 +188,10 @@ def pixel_url(data: str, dest: str) -> str:
 
 def montar(dest, arte: Path, c: dict, n: int, prefixo="", data_disparo=""):
     link = f"https://wa.me/{WHATSAPP}?text={urllib.parse.quote(MSG_WHATS)}"
-    sair = f"mailto:{SMTP_USER}?subject=SAIR&body={urllib.parse.quote('Não quero mais receber ofertas de consórcio.')}"
+    sair_mailto = f"mailto:{SMTP_USER}?subject=SAIR&body={urllib.parse.quote('Não quero mais receber ofertas de consórcio.')}"
+    px_url = pixel_url(data_disparo, dest)
+    sair_web = px_url.replace("/o/", "/sair/").removesuffix(".gif") if px_url else ""
+    sair = sair_web or sair_mailto
     assunto = prefixo + c["ASSUNTO"]
     preheader = c["SUBTITULO"] or c["TITULO"] or c["ASSUNTO"]
     ass = ('<tr><td style="padding:26px 24px 24px;"><img src="cid:assinatura" width="552" alt="Silvano Piacentine — Piaseg Seguros" '
@@ -218,7 +221,11 @@ Você recebe este e-mail por ter relacionamento com a Piaseg Seguros. Não quer 
     msg["To"] = dest
     msg["Date"] = formatdate(localtime=True)
     msg["Message-ID"] = make_msgid(domain="piaseg.com.br")
-    msg["List-Unsubscribe"] = f"<mailto:{SMTP_USER}?subject=SAIR>"
+    if sair_web:
+        msg["List-Unsubscribe"] = f"<{sair_web}>, <mailto:{SMTP_USER}?subject=SAIR>"
+        msg["List-Unsubscribe-Post"] = "List-Unsubscribe=One-Click"
+    else:
+        msg["List-Unsubscribe"] = f"<mailto:{SMTP_USER}?subject=SAIR>"
     alt = MIMEMultipart("alternative")
     alt.attach(MIMEText(texto, "plain", "utf-8"))
     alt.attach(MIMEText(corpo, "html", "utf-8"))
