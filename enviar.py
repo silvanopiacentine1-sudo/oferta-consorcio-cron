@@ -172,7 +172,21 @@ def modelo_5(c, link):  # PERGUNTA — pergunta grande + respostas curtas
 MODELOS = {1: modelo_1, 2: modelo_2, 3: modelo_3, 4: modelo_4, 5: modelo_5}
 
 
-def montar(dest, arte: Path, c: dict, n: int, prefixo=""):
+PIXEL_BASE = os.getenv("PIXEL_BASE", "https://oferta-consorcio-pixel.vercel.app/o/")
+
+
+def pixel_url(data: str, dest: str) -> str:
+    """URL única por destinatário/disparo para registrar a abertura (vazio se PIXEL_SECRET ausente)."""
+    import hmac, hashlib, json as _j
+    seg = os.getenv("PIXEL_SECRET", "")
+    if not seg or not data:
+        return ""
+    payload = base64.urlsafe_b64encode(_j.dumps({"d": data, "e": dest}, separators=(",", ":")).encode()).decode().rstrip("=")
+    sig = hmac.new(seg.encode(), payload.encode(), hashlib.sha256).hexdigest()[:16]
+    return f"{PIXEL_BASE}{payload}.{sig}.gif"
+
+
+def montar(dest, arte: Path, c: dict, n: int, prefixo="", data_disparo=""):
     link = f"https://wa.me/{WHATSAPP}?text={urllib.parse.quote(MSG_WHATS)}"
     sair = f"mailto:{SMTP_USER}?subject=SAIR&body={urllib.parse.quote('Não quero mais receber ofertas de consórcio.')}"
     assunto = prefixo + c["ASSUNTO"]
@@ -192,6 +206,7 @@ def montar(dest, arte: Path, c: dict, n: int, prefixo=""):
 <p style="font-family:{FONT};font-size:11px;color:#8a979f;max-width:560px;margin:16px auto 0;line-height:1.5;text-align:center;">
 Você recebe este e-mail por ter relacionamento com a Piaseg Seguros. Não quer mais receber ofertas de consórcio?
 <a href="{sair}" style="color:#8a979f;">Clique aqui para sair da lista</a>.</p>
+{f'<img src="{px}" width="1" height="1" alt="" style="display:block;width:1px;height:1px;border:0;">' if (px := pixel_url(data_disparo, dest)) else ''}
 </td></tr></table></body></html>"""
     texto = "\n".join(x for x in [c["TITULO"], c["SUBTITULO"], c["TEXTO"], *[f"- {i.replace('|', ':')}" for i in c["ITENS"]],
                                     c["FECHAMENTO"], f"\nFale no WhatsApp: {link}", WHATS_FMT,

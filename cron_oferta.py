@@ -23,6 +23,7 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
 
 import enviar as E
+import relatorio as R
 
 PASTA_RAIZ = "Oferta de Consórcio"
 PASTA_CTRL = "Controle (não mexer)"
@@ -81,6 +82,10 @@ class Drive:
     def texto(self, fid) -> str:
         return self.baixar(fid).decode("utf-8", "replace")
 
+    def gravar_bin(self, fid, dados: bytes, mime: str):
+        media = MediaIoBaseUpload(io.BytesIO(dados), mimetype=mime, resumable=False)
+        self.s.files().update(fileId=fid, media_body=media).execute()
+
     def gravar(self, fid, conteudo: str, tentativas=3):
         for t in range(tentativas):
             try:
@@ -128,6 +133,81 @@ def linhas(txt):
     return [l for l in txt.splitlines() if l.strip() and not l.lstrip().startswith("#")]
 
 
+# ---------------- relatório ----------------
+def ler_lista(dr, itens_raiz):
+    import pandas as pd
+    nome_lista = next((n for n in itens_raiz if n.lower().startswith("lista de e-mail")), None)
+    if not nome_lista:
+        raise RuntimeError("Arquivo 'Lista de e-mail' não encontrado")
+    df = pd.read_excel(io.BytesIO(dr.baixar(itens_raiz[nome_lista]["id"])))
+    col = next(cn for cn in df.columns if "mail" in str(cn).lower())
+    coln = next((cn for cn in df.columns if "nome" in str(cn).lower()), None)
+    lista, nomes = [], {}
+    for _, r in df.iterrows():
+        v = r[col]
+        if not isinstance(v, str):
+            continue
+        m = v.strip().lower()
+        if RE_EMAIL.match(m) and m not in nomes:
+            nomes[m] = str(r[coln]).strip() if coln is not None and isinstance(r[coln], str) else ""
+            lista.append(m)
+    return lista, nomes
+
+
+def ler_devolvidos(txt):
+    out = {}
+    for l in linhas(txt):
+        p = l.split("\t")
+        if len(p) >= 2:
+            out[(p[0], p[1].strip().lower())] = p[2] if len(p) > 2 else ""
+    return out
+
+
+def atualizar_relatorio(dr, ctrl, itens_raiz):
+    """Lê devoluções + aberturas e regrava 'Relatório de Envios.xlsx'. Nunca derruba o envio."""
+    try:
+        nome_rel = next((n for n in ctrl if n.lower().startswith("relatório de envios")), None)
+        if not nome_rel or "devolvidos.txt" not in ctrl:
+            log("aviso: relatório ou devolvidos.txt ausente na pasta Controle — relatório não gerado"); return set()
+        envios = {}
+        for l in linhas(dr.texto(ctrl["envios.txt"]["id"])):
+            d, _, e = l.partition("\t")
+            envios.setdefault(d, {})[e.strip().lower()] = None
+        enviados = {d: list(v) for d, v in envios.items()}
+        historico = [l.split("\t") for l in linhas(dr.texto(ctrl["historico.txt"]["id"]))]
+        datas_hist = {h[0] for h in historico}
+        agenda = {k.strip(): v.strip() for k, _, v in (l.partition("=") for l in linhas(dr.texto(ctrl["agenda.txt"]["id"])))}
+        for d in sorted(enviados):  # disparo sem linha no histórico (ex.: em andamento)
+            if d not in datas_hist:
+                sem = agenda.get(d, "")
+                sem = sem if sem.isdigit() else str(E.semana_do_mes(dt.date.fromisoformat(d)))
+                historico.append([d, sem, "", "", "em andamento", str(len(enviados[d]))])
+        historico.sort(key=lambda h: h[0])
+        f_dev = ctrl["devolvidos.txt"]["id"]
+        dev_txt = dr.texto(f_dev)
+        devolvidos = ler_devolvidos(dev_txt)
+        if enviados:
+            desde = max(dt.date.fromisoformat(min(enviados)), dt.date.today() - dt.timedelta(days=45))
+            novos = R.coletar_devolucoes(E.SMTP_HOST, E.SMTP_USER, E.SMTP_PASS,
+                                         {d: set(v) for d, v in enviados.items()}, devolvidos, desde, log)
+            if novos:
+                dev_txt = dev_txt.rstrip("\n") + "\n" + "\n".join(f"{d}\t{e}\t{m}" for (d, e), m in sorted(novos.items())) + "\n"
+                dr.gravar(f_dev, dev_txt)
+                devolvidos.update(novos)
+                log(f"{len(novos)} novos e-mails devolvidos registrados")
+        sheet = ctrl.get("aberturas", {}).get("id", "")
+        aberturas = R.ler_aberturas(json.loads(os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"]), sheet, log)
+        _, nomes = ler_lista(dr, itens_raiz)
+        sair = {l.strip().lower() for l in linhas(dr.texto(ctrl["descadastrados.txt"]["id"]))}
+        xlsx = R.gerar_excel(historico, enviados, devolvidos, aberturas, nomes, sair)
+        dr.gravar_bin(ctrl[nome_rel]["id"], xlsx, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        log(f"Relatório atualizado: {len(enviados)} disparo(s), {len(devolvidos)} devolvidos, {len(aberturas)} aberturas")
+        return {e for (_, e) in devolvidos}
+    except Exception:
+        log("aviso: falha ao gerar relatório:\n" + traceback.format_exc())
+        return set()
+
+
 # ---------------- principal ----------------
 def main():
     hoje = dt.date.fromisoformat(os.environ["FORCAR_DATA"]) if os.getenv("FORCAR_DATA") else dt.datetime.now(FUSO).date()
@@ -154,11 +234,14 @@ def main():
         for l in linhas(dr.texto(ctrl["agenda.txt"]["id"])):
             if "=" in l:
                 k, v = l.split("=", 1); agenda[k.strip()] = v.strip().lower()
+        devolvidos_todos = set() if teste else atualizar_relatorio(dr, ctrl, itens_raiz)
         semana = E.semana_do_mes(hoje)
         if hj in agenda:
             if agenda[hj] == "pular":
                 log("Agenda: hoje está marcado para PULAR."); salvar_log(); return
             semana = int(agenda[hj])
+        elif hoje.weekday() != 1 and not teste:
+            log("Hoje não é dia de envio (só terças ou datas da agenda) — só relatório."); salvar_log(); return
         log(f"Semana {semana}{' (definida na agenda)' if hj in agenda else ' (semana do mês)'}")
 
         # 2) arte + textos
@@ -197,17 +280,7 @@ def main():
         if teste:
             lista = TESTE_PARA
         else:
-            import pandas as pd
-            nome_lista = next((n for n in itens_raiz if n.lower().startswith("lista de e-mail")), None)
-            if not nome_lista:
-                raise RuntimeError("Arquivo 'Lista de e-mail' não encontrado")
-            df = pd.read_excel(io.BytesIO(dr.baixar(itens_raiz[nome_lista]["id"])))
-            col = next(cn for cn in df.columns if "mail" in str(cn).lower())
-            lista, vistos = [], set()
-            for v in df[col].dropna().astype(str):
-                m = v.strip().lower()
-                if RE_EMAIL.match(m) and m not in vistos:
-                    vistos.add(m); lista.append(m)
+            lista, _ = ler_lista(dr, itens_raiz)
 
         # 4) descadastros
         desc_txt = dr.texto(f_desc)
@@ -221,9 +294,10 @@ def main():
         # 5) quem já recebeu HOJE (retomada sem duplicar)
         envios_txt = dr.texto(f_envios)
         ja = {l.split("\t")[1] for l in linhas(envios_txt) if l.startswith(hj + "\t")} if not teste else set()
-        fila = [m for m in lista if m not in ja and m not in sair]
+        fila = [m for m in lista if m not in ja and m not in sair and m not in devolvidos_todos]
         n_sair = sum(1 for m in lista if m in sair)
-        log(f"Lista {len(lista)} | já receberam hoje {len(ja)} | descadastrados {n_sair} | a enviar {len(fila)}")
+        n_dev = sum(1 for m in lista if m in devolvidos_todos and m not in sair)
+        log(f"Lista {len(lista)} | já receberam hoje {len(ja)} | descadastrados {n_sair} | endereço errado (fora) {n_dev} | a enviar {len(fila)}")
         salvar_log()
 
         # 6) envio
@@ -246,7 +320,7 @@ def main():
                 if smtp is None:
                     smtp = smtplib.SMTP_SSL(E.SMTP_HOST, 465, context=ssl.create_default_context(), timeout=60)
                     smtp.login(E.SMTP_USER, E.SMTP_PASS)
-                msg, _ = E.montar(dest, p_arte, c, semana, prefixo="[TESTE] " if teste else "")
+                msg, _ = E.montar(dest, p_arte, c, semana, prefixo="[TESTE] " if teste else "", data_disparo=hj)
                 smtp.send_message(msg)
                 enviados += 1; seguidas = 0
                 novos_envios.append(f"{hj}\t{dest}")
@@ -289,8 +363,12 @@ def main():
             hist_linhas = [l for l in hist_txt.splitlines() if not l.startswith(hj + "\t")]
             hist_linhas.append(f"{hj}\t{semana}\t{arte['name']}\t{md5}\t{'parado' if parada else 'concluido'}\t{total}")
             dr.gravar(f_hist, "\n".join(hist_linhas) + "\n")
+            ctrl = dr.filhos(dr.pasta(PASTA_CTRL, raiz))
+            atualizar_relatorio(dr, ctrl, itens_raiz)
         corpo = (f"Oferta de Consórcio — {hoje:%d/%m/%Y} — Semana {semana}\nAssunto: {c['ASSUNTO']}\n\n"
                  f"Status: {status}\nEnviados: {total} de {len(lista)}\nDescadastrados (não receberam): {n_sair}\n"
+                 f"Fora por endereço errado em envio anterior: {n_dev}\n"
+                 f"Relatório completo (entregues, abertos, devolvidos): pasta 'Controle (não mexer)' > Relatório de Envios.xlsx\n"
                  f"Falhas: {len(falhas)}\nDuração: {dur:.0f} min\n")
         if parada:
             corpo += f"\nMotivo da parada: {parada}\nAo rodar de novo no mesmo dia, continua de onde parou (ninguém recebe em dobro).\n"
