@@ -328,6 +328,7 @@ def main():
         # 6) envio
         enviados, falhas, seguidas, parada = 0, [], 0, ""
         novos_envios: list[str] = []
+        recusados: dict[str, str] = {}
         smtp = None
         t_ini = time.time()
 
@@ -359,6 +360,7 @@ def main():
                 parada = f"login recusado pelo servidor ({ex})"; break
             except smtplib.SMTPRecipientsRefused as ex:
                 falhas.append((dest, str(ex)[:160])); seguidas = 0
+                recusados[dest] = "recusado na hora pelo servidor: " + re.sub(r"\s+", " ", str(list(ex.recipients.values())[0][1:]))[:150]
             except Exception as ex:
                 falhas.append((dest, str(ex)[:160])); seguidas += 1
                 try:
@@ -384,6 +386,13 @@ def main():
         dur = (time.time() - t_ini) / 60
         log(f"FIM {status} | enviados agora {enviados} | total hoje {total}/{len(lista)} | falhas {len(falhas)} | {dur:.0f} min {parada}")
         persistir()
+        if recusados and not teste and "devolvidos.txt" in ctrl:
+            f_dev = ctrl["devolvidos.txt"]["id"]
+            dev_txt = dr.texto(f_dev)
+            ja_dev = {tuple(l.split("\t")[:2]) for l in linhas(dev_txt)}
+            add = [f"{hj}\t{e}\t{m}" for e, m in recusados.items() if (hj, e) not in ja_dev]
+            if add:
+                dr.gravar(f_dev, dev_txt.rstrip("\n") + "\n" + "\n".join(add) + "\n")
         if not teste:
             hist_linhas = [l for l in hist_txt.splitlines() if not l.startswith(hj + "\t")]
             hist_linhas.append(f"{hj}\t{semana}\t{arte['name']}\t{md5}\t{'parado' if parada else 'concluido'}\t{total}")
